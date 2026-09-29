@@ -22,7 +22,6 @@ Public API
 """
 from __future__ import annotations
 
-import html
 import ipaddress
 import logging
 import re
@@ -230,7 +229,11 @@ class FilterEngine:
                 raise ValueError(f"Failed to compile URL regex {pat!r}: {exc}") from exc
 
         # 5. SSRF guard & private allow
-        block_private_ips = bool(cls._get_config_val(config, "filter.block_private_ips", True))
+        block_private_ips = cls._get_config_val(
+            config, "filter.block_private_ips", True
+        )
+        if not isinstance(block_private_ips, bool):
+            raise ValueError("filter.block_private_ips must be a boolean")
         raw_private_allow = cls._get_config_val(config, "filter.private_allow", [])
         if not isinstance(raw_private_allow, (list, tuple)):
             raise ValueError("filter.private_allow must be a list of 'host:port' strings")
@@ -241,7 +244,7 @@ class FilterEngine:
                 raise ValueError(f"private_allow entry must be a string: {entry!r}")
             entry_clean = entry.strip()
             if not entry_clean:
-                continue
+                raise ValueError("private_allow entries must not be empty")
             if ":" not in entry_clean:
                 raise ValueError(f"Invalid private_allow entry (missing port): {entry!r}")
             h_part, p_part = entry_clean.rsplit(":", 1)
@@ -252,15 +255,14 @@ class FilterEngine:
             except ValueError:
                 raise ValueError(f"Invalid port in private_allow entry: {entry!r}")
 
-            h_norm = h_part.strip().lower()
-            if h_norm.startswith("[") and h_norm.endswith("]"):
-                h_norm = h_norm[1:-1]
+            h_norm = h_part.strip()
             try:
                 norm_obj = normalize_host(h_norm)
-                private_allow_set.add((norm_obj.value, port_num))
-            except Exception:
-                private_allow_set.add((h_norm, port_num))
-            private_allow_set.add((h_part.strip().lower(), port_num))
+            except (HostNormError, ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"Invalid host in private_allow entry: {entry!r}"
+                ) from exc
+            private_allow_set.add((norm_obj.value, port_num))
 
         return _CompiledRules(
             mode=mode,
@@ -478,37 +480,10 @@ class FilterEngine:
         }
 
     def forbidden_response(self, decision: Decision) -> bytes:
-        """Return complete HTTP/1.1 403 Forbidden response bytes.
+        """Delegate 403 response construction to the response layer."""
+        from proxy.control.responses import build_forbidden
 
-        Delegates to ``proxy.control.responses`` when present, or provides
-        the compliant HTML block page response required by B4.4.
-        """
-        try:
-            from proxy.control.responses import build_forbidden
-
-            return build_forbidden(decision)
-        except (ImportError, AttributeError):
-            pass
-
-        safe_reason = html.escape(decision.reason or "Forbidden")
-        body = (
-            "<!DOCTYPE html>\n"
-            "<html>\n"
-            "<head><title>403 Forbidden</title></head>\n"
-            "<body>\n"
-            "<h1>403 Forbidden</h1>\n"
-            f"<p>{safe_reason}</p>\n"
-            "</body>\n"
-            "</html>\n"
-        ).encode("utf-8")
-
-        headers = (
-            b"HTTP/1.1 403 Forbidden\r\n"
-            b"Content-Type: text/html; charset=utf-8\r\n"
-            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
-            b"Connection: close\r\n\r\n"
-        )
-        return headers + body
+        return build_forbidden(decision)
 
 
 def build_filter(config: Any) -> FilterEngine:

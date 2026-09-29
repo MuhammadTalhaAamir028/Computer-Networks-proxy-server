@@ -61,7 +61,10 @@ def parse_head(head: bytes) -> ParsedRequest:
     request_line = lines[0]
 
     # --- STAGE 2b: split request line into method / target / version ---
-    method, target, version = request_line.split(" ")
+    parts = request_line.split(" ")
+    if len(parts) != 3:  # STAGE 3: must be exactly 3 parts
+        raise BadRequest(400, "malformed request line")
+    method, target, version = parts
 
     # --- STAGE 2d: build the headers dict (lowercase names) ---
     headers = {}

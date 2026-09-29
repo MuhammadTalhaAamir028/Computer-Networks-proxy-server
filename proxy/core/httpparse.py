@@ -9,7 +9,7 @@ Pipeline (each stage is one function, filled in later):
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlsplit
-
+import socket
 # ============================================================
 # PART 0: DATA SHAPES
 # What the rest of the proxy receives from this file.
@@ -45,7 +45,24 @@ class ParsedRequest:
 # Must survive: bytes arriving 1 at a time, oversized heads, slow clients.
 # (Function comes later.)
 # ============================================================
+MAX_HEAD_BYTES = 65536          # refuse heads bigger than 64 KB
 
+
+def read_head(sock):
+    """Read until the blank line. Returns (head, leftover)."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        if len(data) > MAX_HEAD_BYTES:
+            raise BadRequest(431, "request head too large")
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            raise BadRequest(408, "timed out waiting for request")
+        if not chunk:                       # client hung up early
+            raise BadRequest(400, "connection closed before request completed")
+        data += chunk
+    head, _, leftover = data.partition(b"\r\n\r\n")
+    return head + b"\r\n\r\n", leftover
 
 # ============================================================
 # STAGE 2 + 3: PARSE AND VALIDATE THE HEAD

@@ -92,7 +92,11 @@ def _validate_raw_host(host: str) -> None:
             raise HostNormError("Host contains NUL byte (\\x00)")
         if c.isspace():
             raise HostNormError("Host contains whitespace")
-        if ord(c) < 32 or ord(c) == 127 or unicodedata.category(c) == "Cc":
+        if (
+            ord(c) < 32
+            or ord(c) == 127
+            or unicodedata.category(c) in {"Cc", "Cf"}
+        ):
             raise HostNormError(f"Host contains control character {c!r}")
 
 
@@ -248,6 +252,11 @@ def normalize_hostname(host: str) -> str:
             f"Invalid internationalized domain name (IDNA) {host!r}: {exc}"
         ) from exc
 
+    if len(ascii_host) > 253:
+        raise HostNormError(
+            "Canonical hostname exceeds maximum length of 253 characters"
+        )
+
     # Enforce DNS label constraints (RFC 1123 / RFC 1035)
     labels = ascii_host.split(".")
     for label in labels:
@@ -262,7 +271,7 @@ def normalize_hostname(host: str) -> str:
                 f"Hostname label cannot start or end with a hyphen: {label!r}"
             )
         for c in label:
-            if not (c.isalnum() or c in "-_"):
+            if not (c.isalnum() or c == "-"):
                 raise HostNormError(
                     f"Invalid character {c!r} in hostname {host!r}"
                 )
@@ -311,10 +320,6 @@ def parse_ip_literal(host: str) -> Optional[IPAddress]:
 
     if "[" in host or "]" in host:
         return None
-
-    # Strip one trailing dot if present
-    if host.endswith("."):
-        host = host[:-1]
 
     # IPv6 literals without brackets
     if ":" in host:
@@ -393,7 +398,14 @@ def normalize_host(host: str) -> NormalizedHost:
     if "[" in host or "]" in host:
         raise HostNormError(f"Malformed host: misplaced square brackets in {host!r}")
 
-    # 2. Trailing-dot handling
+    # Parse IP literals before applying DNS hostname trailing-dot rules.
+    parsed_ip = parse_ip_literal(host)
+    if parsed_ip is not None:
+        return NormalizedHost(value=str(parsed_ip), is_ip=True, ip=parsed_ip)
+    if host.endswith(".") and parse_ip_literal(host[:-1]) is not None:
+        raise HostNormError("IP literals must not contain a trailing dot")
+
+    # 2. Trailing-dot handling for DNS hostnames only.
     if host == ".":
         raise HostNormError("Host cannot be a single dot")
     if host.endswith("."):
@@ -405,25 +417,6 @@ def normalize_host(host: str) -> NormalizedHost:
     if ".." in host:
         raise HostNormError("Malformed host: empty domain label ('..')")
 
-    # 3. IPv6 without brackets
-    if ":" in host:
-        try:
-            ip = ipaddress.IPv6Address(host)
-        except ValueError as exc:
-            raise HostNormError(
-                f"Invalid host: {host!r} contains a colon but is not a valid IPv6 literal"
-            ) from exc
-
-        if ip.ipv4_mapped is not None:
-            mapped_ip = ip.ipv4_mapped
-            return NormalizedHost(value=str(mapped_ip), is_ip=True, ip=mapped_ip)
-        return NormalizedHost(value=str(ip), is_ip=True, ip=ip)
-
-    # 4. IPv4 and legacy IPv4 forms
-    if _looks_like_ipv4(host):
-        ip = _parse_ipv4_literal(host)
-        return NormalizedHost(value=str(ip), is_ip=True, ip=ip)
-
-    # 5. DNS hostname normalization
+    # DNS hostname normalization is the only remaining path.
     canonical_name = normalize_hostname(host)
     return NormalizedHost(value=canonical_name, is_ip=False, ip=None)

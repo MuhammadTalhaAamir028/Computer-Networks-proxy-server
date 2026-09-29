@@ -72,7 +72,7 @@ def parse_head(head: bytes) -> ParsedRequest:
         headers[name.strip().lower()] = value.strip()
 
     # --- STAGE 4: work out host, port, path from the target ---
-    host, port, path = _extract_target(target)
+    host, port, path = _extract_target(method, target)
 
     return ParsedRequest(method=method, host=host, port=port,
                          path=path, version=version, headers=headers)
@@ -85,8 +85,15 @@ def parse_head(head: bytes) -> ParsedRequest:
 # (Function comes later.)
 # ============================================================
 
-def _extract_target(target: str):
-    """'http://example.com:8000/a?x=1' -> ('example.com', 8000, '/a?x=1')"""
+def _extract_target(method: str, target: str):
+    """Work out (host, port, path) from the request target."""
+
+    # --- CONNECT: target is "host:port", no scheme, no path ---
+    if method == "CONNECT":
+        host, _, port_text = target.rpartition(":")
+        return host, int(port_text), None
+
+    # --- Plain HTTP: target is a full URL ---
     parts = urlsplit(target)
     host = parts.hostname
     port = parts.port or 80            # no port given -> 80

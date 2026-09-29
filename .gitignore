@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.idea/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+config.local.json

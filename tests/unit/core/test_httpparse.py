@@ -56,3 +56,12 @@ def test_request_line_with_two_parts_is_rejected():
     with pytest.raises(BadRequest) as err:
         parse_head(head)
     assert err.value.status == 400
+
+
+def test_bad_version_is_rejected():
+    """HTTP/2.0 is not supported -> BadRequest, not a crash."""
+    head = (b"GET http://example.com/ HTTP/2.0\r\n"
+            b"Host: example.com\r\n"
+            b"\r\n")
+    with pytest.raises(BadRequest):
+        parse_head(head)

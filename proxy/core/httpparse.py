@@ -66,6 +66,9 @@ def parse_head(head: bytes) -> ParsedRequest:
         raise BadRequest(400, "malformed request line")
     method, target, version = parts
 
+    # --- STAGE 3: only HTTP/1.0 and HTTP/1.1 are supported ---
+    if version not in ("HTTP/1.0", "HTTP/1.1"):
+        raise BadRequest(505, "HTTP version not supported")
     # --- STAGE 2d: build the headers dict (lowercase names) ---
     headers = {}
     for line in lines[1:]:

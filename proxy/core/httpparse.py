@@ -90,8 +90,17 @@ def _extract_target(method: str, target: str):
 
     # --- CONNECT: target is "host:port", no scheme, no path ---
     if method == "CONNECT":
-        host, _, port_text = target.rpartition(":")
-        return host, int(port_text), None
+        host, sep, port_text = target.rpartition(":")
+
+        # STAGE 3 validation: need a colon, a host, and a numeric port
+        if not sep or not host or not port_text.isdigit():
+            raise BadRequest(400, "CONNECT target must be host:port")
+
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            raise BadRequest(400, "port out of range")
+
+        return host, port, None
 
     # --- Plain HTTP: target is a full URL ---
     parts = urlsplit(target)

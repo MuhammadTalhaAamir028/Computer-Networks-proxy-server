@@ -1,5 +1,6 @@
 """tests/unit/core/test_httpparse.py -- tests for the request parser."""
-from proxy.core.httpparse import parse_head
+import pytest
+from proxy.core.httpparse import parse_head, BadRequest
 
 # ============================================================
 # STAGE 2 + 4: a normal proxy request is understood
@@ -32,3 +33,17 @@ def test_connect_host_and_port():
     assert req.host == "example.com"
     assert req.port == 443
     assert req.path is None
+
+
+# ============================================================
+# STAGE 3: VALIDATION (garbage in -> BadRequest out, never a crash)
+# ============================================================
+
+def test_connect_without_port_is_rejected():
+    """CONNECT example.com (no :port) -> BadRequest with status 400."""
+    head = (b"CONNECT example.com HTTP/1.1\r\n"
+            b"Host: example.com\r\n"
+            b"\r\n")
+    with pytest.raises(BadRequest) as err:
+        parse_head(head)
+    assert err.value.status == 400

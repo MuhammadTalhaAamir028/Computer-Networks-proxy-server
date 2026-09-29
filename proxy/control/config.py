@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import argparse
 import copy
+import ipaddress
 import json
 import logging
+import math
 import os
+import re
 import signal
 import sys
 import threading
+from collections.abc import Mapping
+from types import MappingProxyType
 from pathlib import Path
 from typing import (
     Any,
@@ -53,6 +58,11 @@ def _is_sensitive_key(key: str) -> bool:
     return any(sub in low for sub in _SUBSTRING_REDACT_KEYS)
 
 
+def _path_is_sensitive(key: str) -> bool:
+    """Recognise secrets even when *key* is a dotted nested path."""
+    return any(_is_sensitive_key(part) for part in key.split("."))
+
+
 # ── deep helpers ───────────────────────────────────────────────
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict with *override* deep-merged onto *base*.
@@ -78,9 +88,28 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+def _freeze(obj: Any) -> Any:
+    """Return a recursively immutable representation of *obj*."""
+    if isinstance(obj, dict):
+        return MappingProxyType({key: _freeze(value)
+                                 for key, value in obj.items()})
+    if isinstance(obj, list):
+        return tuple(_freeze(value) for value in obj)
+    return obj
+
+
+def _thaw(obj: Any) -> Any:
+    """Return an ordinary deep-copyable representation of a frozen value."""
+    if isinstance(obj, Mapping):
+        return {key: _thaw(value) for key, value in obj.items()}
+    if isinstance(obj, tuple):
+        return [_thaw(value) for value in obj]
+    return copy.deepcopy(obj)
+
+
 def _deep_redact(obj: Any) -> Any:
     """Return a deep copy of *obj* with sensitive values replaced."""
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         out: Dict[str, Any] = {}
         for k, v in obj.items():
             if _is_sensitive_key(k):
@@ -88,7 +117,7 @@ def _deep_redact(obj: Any) -> Any:
             else:
                 out[k] = _deep_redact(v)
         return out
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [_deep_redact(item) for item in obj]
     return copy.deepcopy(obj)
 
@@ -110,7 +139,7 @@ def _get_dotted(data: Dict[str, Any], dotted_key: str,
     """Retrieve a value from *data* using a ``"a.b.c"`` dotted path."""
     cur: Any = data
     for part in dotted_key.split("."):
-        if not isinstance(cur, dict) or part not in cur:
+        if not isinstance(cur, Mapping) or part not in cur:
             return default
         cur = cur[part]
     return cur
@@ -136,7 +165,7 @@ def _safe_value_repr(key: str, value: Any) -> str:
 
     If the key is sensitive the value is replaced with ``[REDACTED]``.
     """
-    if _is_sensitive_key(key):
+    if _path_is_sensitive(key):
         return _REDACTED
     return repr(value)
 
@@ -208,6 +237,14 @@ def _validate(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     errors: List[str] = []
     warnings: List[str] = []
 
+    for section in ("proxy", "admin", "filter", "auth", "logging"):
+        value = data.get(section)
+        if value is not None and not isinstance(value, dict):
+            errors.append(
+                f"{section} must be a dict, got "
+                f"{_safe_value_repr(section, value)}"
+            )
+
     # --- unknown keys ---
     user_keys = set(_collect_all_dotted_keys(data))
     # Also collect intermediate dict keys so "proxy" itself isn't
@@ -254,9 +291,10 @@ def _validate(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         val = _get_dotted(data, key)
         if val is None:
             return
-        if not isinstance(val, (int, float)) or isinstance(val, bool):
+        if (not isinstance(val, (int, float)) or isinstance(val, bool)
+                or not math.isfinite(float(val))):
             errors.append(
-                f"{key} must be a number, got "
+                f"{key} must be a finite number, got "
                 f"{_safe_value_repr(key, val)}"
             )
             return
@@ -305,7 +343,8 @@ def _validate(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             return
         if item_type is not None:
             for i, item in enumerate(val):
-                if not isinstance(item, item_type):
+                if (not isinstance(item, item_type)
+                        or (item_type is int and isinstance(item, bool))):
                     errors.append(
                         f"{key}[{i}] must be {item_label}, got "
                         f"{_safe_value_repr(key, item)}"
@@ -334,6 +373,59 @@ def _validate(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     _check_list("filter.deny_url_regex", str, "a string")
     _check_bool("filter.block_private_ips")
     _check_list("filter.private_allow", str, "a string")
+
+    def _valid_domain(value: str) -> bool:
+        candidate = value[2:] if value.startswith("*.") else value
+        if value.startswith("*.") and candidate.count(".") < 1:
+            return False
+        if not candidate or len(candidate) > 253 or candidate.startswith("."):
+            return False
+        if candidate.endswith("."):
+            candidate = candidate[:-1]
+        return all(
+            label and len(label) <= 63 and label[0].isalnum()
+            and label[-1].isalnum()
+            and all(ch.isalnum() or ch == "-" for ch in label)
+            for label in candidate.split(".")
+        )
+
+    for list_key in ("filter.deny_domains", "filter.allow_domains"):
+        values = _get_dotted(data, list_key)
+        if isinstance(values, list):
+            for i, value in enumerate(values):
+                if isinstance(value, str) and not _valid_domain(value):
+                    errors.append(f"{list_key}[{i}] is not a valid domain")
+
+    private_allow = _get_dotted(data, "filter.private_allow")
+    if isinstance(private_allow, list):
+        for i, value in enumerate(private_allow):
+            if not isinstance(value, str):
+                continue
+            host, sep, port = value.rpartition(":")
+            valid_host = False
+            if sep and port.isdigit():
+                try:
+                    ipaddress.ip_address(host.strip("[]"))
+                    valid_host = True
+                except ValueError:
+                    valid_host = _valid_domain(host)
+                if not (1 <= int(port) <= 65535):
+                    valid_host = False
+            if not valid_host:
+                errors.append(
+                    f"filter.private_allow[{i}] must be a valid host:port"
+                )
+
+    regexes = _get_dotted(data, "filter.deny_url_regex")
+    if isinstance(regexes, list):
+        for i, value in enumerate(regexes):
+            if isinstance(value, str):
+                try:
+                    re.compile(value)
+                except re.error:
+                    errors.append(
+                        f"filter.deny_url_regex[{i}] is not a valid regex"
+                    )
 
     # Validate port values inside port lists.
     for list_key in ("filter.blocked_ports", "filter.allowed_ports"):
@@ -372,7 +464,18 @@ def _validate(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
                     errors.append(
                         f"auth.users.{uname} is missing 'hash'"
                     )
-                # Do NOT include salt/hash values in messages.
+                for credential in ("salt", "hash"):
+                    value = udata.get(credential)
+                    key = f"auth.users.{uname}.{credential}"
+                    expected_length = 32 if credential == "salt" else 64
+                    if credential in udata and (
+                            not isinstance(value, str)
+                            or len(value) != expected_length
+                            or re.fullmatch(r"[0-9a-fA-F]+", value) is None
+                    ):
+                        errors.append(
+                            f"{key} must be a non-empty hexadecimal string"
+                        )
 
     _check_int("auth.max_failures", min_val=1)
     _check_int("auth.lockout_seconds", min_val=0)
@@ -452,6 +555,15 @@ def _parse_set_value(raw: str) -> Any:
         return raw
 
 
+def _parse_cli(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse CLI arguments and turn argparse's process exit into ConfigError."""
+    parser = _build_parser()
+    try:
+        return parser.parse_args(list(argv))
+    except SystemExit as exc:
+        raise ConfigError("Invalid command-line arguments") from exc
+
+
 def _cli_overrides_to_dict(
     args: argparse.Namespace,
 ) -> Tuple[Dict[str, Any], List[str]]:
@@ -494,6 +606,9 @@ def _cli_overrides_to_dict(
                 f"Malformed --set (invalid dotted key): {key}"
             )
             continue
+        if not raw_val:
+            errors.append(f"Malformed --set (empty value): {entry}")
+            continue
         value = _parse_set_value(raw_val)
         _set_dotted(overlay, key, value)
 
@@ -522,11 +637,11 @@ class Config:
     ) -> None:
         # The single source of truth for readers.  Replaced
         # atomically (reference swap) on successful reload.
-        self._snapshot: Dict[str, Any] = snapshot
+        self._snapshot: Mapping[str, Any] = _freeze(snapshot)
 
         # Sources remembered for reload.
         self._config_path: Optional[str] = config_path
-        self._argv: Optional[List[str]] = argv
+        self._argv: Optional[List[str]] = copy.deepcopy(argv)
 
         # Reload serialisation.
         self._reload_lock = threading.Lock()
@@ -547,7 +662,8 @@ class Config:
 
         Lock-free: reads the current snapshot reference.
         """
-        return _get_dotted(self._snapshot, key, default)
+        value = _get_dotted(self._snapshot, key, default)
+        return _thaw(value)
 
     def reload(self) -> bool:
         """Rebuild configuration from all sources.
@@ -567,7 +683,7 @@ class Config:
                     argv=self._argv,
                 )
                 # Atomic reference swap.
-                self._snapshot = new_snapshot
+                self._snapshot = _freeze(new_snapshot)
                 self.last_error = None
             except ConfigError as exc:
                 self.last_error = str(exc)
@@ -594,7 +710,7 @@ class Config:
         snap = self._snapshot  # single atomic read
         if redact:
             return _deep_redact(snap)
-        return copy.deepcopy(snap)
+        return _thaw(snap)
 
     # ── listener management ───────────────────────────────────
 
@@ -649,15 +765,8 @@ def _build_snapshot(
 
     # We need CLI args for both the --config flag and later
     # overrides, so parse them early.
-    parser = _build_parser()
     if argv is not None:
-        try:
-            args, _ = parser.parse_known_args(argv)
-        except SystemExit:
-            args = argparse.Namespace(
-                config=None, host=None, port=None,
-                admin_port=None, log_file=None, overrides=[],
-            )
+        args = _parse_cli(argv)
     else:
         args = argparse.Namespace(
             config=None, host=None, port=None,
@@ -720,11 +829,7 @@ def load_config(argv: Optional[List[str]] = None) -> Config:
 
     # We parse argv once here to extract --config, then pass the
     # raw argv to _build_snapshot so reload can re-parse.
-    parser = _build_parser()
-    try:
-        pre_args, _ = parser.parse_known_args(argv)
-    except SystemExit:
-        pre_args = argparse.Namespace(config=None)
+    pre_args = _parse_cli(argv)
 
     config_path = pre_args.config
 
@@ -751,5 +856,8 @@ def install_sighup(config: Config) -> bool:
     def _handler(signum: int, frame: Any) -> None:
         config.reload()
 
-    signal.signal(signal.SIGHUP, _handler)  # type: ignore[attr-defined]
+    try:
+        signal.signal(signal.SIGHUP, _handler)  # type: ignore[attr-defined]
+    except (OSError, RuntimeError, ValueError):
+        return False
     return True

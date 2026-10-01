@@ -15,7 +15,9 @@
     },
     "filter": {
         "mode": "denylist",
-        "deny_domains": [],
+        "deny_domains": [
+        "blocked.example.com"
+        ],
         "allow_domains": [],
         "blocked_ports": [
             25

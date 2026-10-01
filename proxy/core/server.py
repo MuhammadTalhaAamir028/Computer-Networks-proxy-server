@@ -30,6 +30,7 @@ class ProxyServer:
         self._last_pool_log = 0.0
         max_threads = int(config.get("proxy.max_threads", 100) or 100)
         self._slots = threading.BoundedSemaphore(max_threads)
+        self._reject_slots = threading.BoundedSemaphore(32)   # cap on in-flight 503 replies
         self._listener = self._bind()
         self._port = self._listener.getsockname()[1]    # saved: still valid after close
         self.ctx = SessionContext(config=config, filt=filter_engine, auth=auth,
@@ -125,18 +126,42 @@ class ProxyServer:
         self._slots.release()
 
     def _reject_overflow(self, client):
-        """Thread cap reached: short 503, then move on. Never blocks the loop long."""
-        try:
-            client.settimeout(0.5)
-            client.sendall(build_error(503, "server busy, try again", retry_after=1))
-        except OSError:
-            pass
-        _close(client)
+        """Thread cap reached: answer 503 without ever blocking the accept loop.
+
+        The 503 is sent from a tiny helper thread that uses a *lingering close*:
+        send, half-close, then read what the client still sends before closing.
+        Closing at once with unread request bytes makes Windows send a TCP RST,
+        which throws the 503 away before the client can read it.
+        """
         now = time.monotonic()
         if now - self._last_pool_log >= 1.0:     # at most one log line per second
             self._last_pool_log = now
             self._log_error("accept", RuntimeError("PoolFull"), "thread pool is full",
                             name="PoolFull")
+        if not self._reject_slots.acquire(blocking=False):
+            _close(client)                       # flood: too many rejects in flight, drop hard
+            return
+        try:
+            threading.Thread(target=self._send_503, args=(client,), daemon=True).start()
+        except RuntimeError:
+            self._reject_slots.release()
+            _close(client)
+
+    def _send_503(self, client):
+        try:
+            client.settimeout(0.5)
+            client.sendall(build_error(503, "server busy, try again", retry_after=1))
+            client.shutdown(socket.SHUT_WR)      # "I'm done sending" -> client reads the 503
+            client.settimeout(0.1)
+            end = time.monotonic() + 0.5
+            while time.monotonic() < end:        # swallow the request bytes still arriving
+                if not client.recv(4096):
+                    break
+        except OSError:
+            pass
+        finally:
+            _close(client)
+            self._reject_slots.release()
 
     def _log_error(self, where, exc, message="", name=None):
         self.logger.event("error", where=where, error=name or type(exc).__name__,

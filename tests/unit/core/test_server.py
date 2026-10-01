@@ -147,3 +147,26 @@ def test_two_proxies_cannot_share_a_port(make_proxy):
     except OSError:
         clash = True
     assert clash
+
+
+def test_flood_over_the_cap_is_rejected_without_hurting_the_busy_slot(make_proxy):
+    """60 extra clients hit a full proxy: the one real session must be unaffected."""
+    slow = HttpOrigin(delay=1.0)
+    proxy = make_proxy(max_threads=1)
+    real = proxy.connect()
+    real.sendall(get_request(slow.port))
+    assert wait_for(lambda: proxy.active() == 1)
+
+    got_503 = 0
+    for _ in range(60):
+        extra = proxy.connect()
+        extra.sendall(get_request(slow.port))
+        if recv_all(extra).startswith(b"HTTP/1.1 503"):
+            got_503 += 1
+        extra.close()
+    assert got_503 >= 30, f"only {got_503}/60 clients saw the 503"   # a few hard drops are ok
+    assert proxy.active() == 1                                       # gauge untouched by rejects
+    assert b"origin ok" in recv_all(real)                            # real client still served
+    real.close()
+    assert wait_for(lambda: proxy.active() == 0)
+    slow.close()

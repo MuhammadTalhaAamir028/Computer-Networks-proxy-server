@@ -1,0 +1,45 @@
+{
+    "proxy": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "max_threads": 100,
+        "backlog": 128,
+        "connect_timeout": 10,
+        "read_timeout": 30,
+        "idle_timeout": 60,
+        "max_header_bytes": 16384
+    },
+    "admin": {
+        "host": "127.0.0.1",
+        "port": 8081
+    },
+    "filter": {
+        "mode": "denylist",
+        "deny_domains": [],
+        "allow_domains": [],
+        "blocked_ports": [
+            25
+        ],
+        "allowed_ports": [],
+        "deny_url_regex": [],
+        "block_private_ips": true,
+        "private_allow": []
+    },
+    "auth": {
+        "enabled": false,
+        "realm": "proxy",
+        "users": {},
+        "max_failures": 5,
+        "lockout_seconds": 60,
+        "failure_window_seconds": 300
+    },
+    "logging": {
+        "file": "logs/proxy.jsonl",
+        "max_bytes": 5000000,
+        "backups": 3,
+        "console": true,
+        "level": "INFO",
+        "ring_size": 2000,
+        "log_query": false
+    }
+}

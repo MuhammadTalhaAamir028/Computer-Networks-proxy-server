@@ -30,7 +30,11 @@ def _real_parts(argv):
     """Real modules from Sufyan and Abdur. Returns (config, flt, auth, logger, stats, admin_fn)."""
     from .control import build_auth, build_filter
     from .control.config import ConfigError, install_sighup, load_config
-    from .obs import build_logger, build_stats, start_admin
+    from .obs import build_logger, build_stats
+    try:
+        from .obs import start_admin
+    except ImportError:                      # Phase 2 admin not merged yet
+        start_admin = None
     try:
         config = load_config(argv)
     except ConfigError as exc:

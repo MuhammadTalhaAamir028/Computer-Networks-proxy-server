@@ -3,7 +3,7 @@
         "host": "127.0.0.1",
         "port": 8080,
         "max_threads": 100,
-        "backlog": 128,
+        "backlog": 1024,
         "connect_timeout": 10,
         "read_timeout": 30,
         "idle_timeout": 60,

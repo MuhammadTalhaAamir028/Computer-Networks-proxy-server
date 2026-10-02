@@ -4,11 +4,15 @@ Run:  python -m proxy --stubs --port 8080      (Phases 1-2: fake teammates)
       python -m proxy --config configs/config.dev.json   (real modules)
 """
 import argparse
+import os
 import signal
 import sys
+from pathlib import Path
 
 from .core import ProxyServer
 from .stubs import AllowAllFilter, DictConfig, MemoryStats, NoAuth, NullLogger
+
+DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "config.dev.json"
 
 STUB_DEFAULTS = {
     "proxy": {"host": "127.0.0.1", "port": 8080, "max_threads": 100, "backlog": 128,
@@ -35,6 +39,10 @@ def _real_parts(argv):
         from .obs import start_admin
     except ImportError:                      # Phase 2 admin not merged yet
         start_admin = None
+    argv = list(sys.argv[1:] if argv is None else argv)
+    explicit = any(a == "--config" or a.startswith("--config=") for a in argv)
+    if not explicit and not os.environ.get("PROXY_CONFIG") and DEFAULT_CONFIG.is_file():
+        argv += ["--config", str(DEFAULT_CONFIG)]
     try:
         config = load_config(argv)
     except ConfigError as exc:

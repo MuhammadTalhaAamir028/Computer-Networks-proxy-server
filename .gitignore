@@ -8,3 +8,4 @@ venv/
 htmlcov/
 *.log
 config.local.json
+reports/
